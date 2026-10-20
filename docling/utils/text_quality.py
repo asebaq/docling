@@ -47,6 +47,34 @@ _ENGLISH_LETTER_FREQ = (
 # Not "Cn" (unassigned): that depends on the Unicode version of the Python running.
 _CONTROL = frozenset({"Cc", "Cs"})
 
+# Fonts with no Unicode map, as docling-parse writes them.
+_MIN_GLYPH_CODES = 20  # Glyph codes written as decimal numbers, one per glyph.
+_GLYPH_CODE_SHARE = 0.6  # ...of all tokens.
+_MIN_GLYPH_CODE = 20  # Median code; note markers stay below it.
+_MIN_GLYPH_CODE_KINDS = 10  # One code per letter shape; a table of years has few.
+_MIN_GLYPH_NAME_WORDS = 8  # Words spelled in Arabic glyph names (`qafisolated`).
+# Fonts that spread one word over several subsets come out one character per cell.
+_MIN_FRAGMENTS = 40
+_FRAGMENT_SHARE = 0.6
+_MIN_FRAGMENT_KINDS = 10  # A bracket or bullet font repeats a few characters.
+_LEADERS = frozenset(".-_*=~")
+
+# Arabic glyph names in fonts (Adobe Glyph List style, glued per word by docling-parse):
+# a letter, optionally `with` another letter (ligatures), then positional suffixes.
+_ARABIC_GLYPHS = (
+    "alef beh teh theh jeem hah khah dal thal reh zain seen sheen sad dad tah zah ain "
+    "ghain feh qaf kaf lam meem noon heh waw yeh hamza tehmarbuta alefmaksura tatweel "
+    "allah alefwasla peh tcheh jeh veh keheh gaf farsiyeh fathatan dammatan kasratan "
+    "fatha damma kasra shadda sukun superscriptalef arabiccomma arabicsemicolon "
+    "arabicquestionmark alefwithhamzaabove alefwithhamzabelow alefwithmaddaabove "
+    "wawwithhamzaabove yehwithhamzaabove alefhamzaabove alefhamzabelow alefmaddaabove "
+    + " ".join(
+        f"arabicindicdigit{d}"
+        for d in "zero one two three four five six seven eight nine".split()
+    )
+).split()
+_GLYPH_SUFFIXES = ("isolated", "initial", "medial", "final", "low")
+
 
 def _share(text: str, categories: frozenset[str], *, replacement: bool) -> float:
     """Share of non-space characters in the given Unicode categories."""
@@ -156,6 +184,83 @@ def _is_shifted_latin(text: str) -> bool:
     )
 
 
+def _has_glyph_codes(tokens: list[str]) -> bool:
+    """Whether most tokens are glyph codes: integers that repeat, as every alef has the
+    same code, but take many values, one per letter shape, above the range of note
+    markers. Page numbers do not repeat; a table of years takes few values."""
+    numbers = [int(t) for t in tokens if t.isascii() and t.isdigit() and len(t) <= 5]
+    if len(numbers) < _MIN_GLYPH_CODES or len(numbers) <= _GLYPH_CODE_SHARE * len(
+        tokens
+    ):
+        return False
+    letters = sum(ch.isalpha() for t in tokens for ch in t)
+    kinds = len(set(numbers))
+    return (
+        _MIN_GLYPH_CODE_KINDS <= kinds <= len(numbers) / 2
+        and sorted(numbers)[len(numbers) // 2] >= _MIN_GLYPH_CODE
+        and letters < len(numbers)
+    )
+
+
+def _glyph_count(token: str) -> int:
+    """How many Arabic glyph names spell the token, or 0 if it is not spelled so."""
+    best = [0] + [-1] * len(token)  # best[i]: fewest glyphs that spell token[:i]
+    for i in range(len(token)):
+        if best[i] < 0:
+            continue
+        ends = [i + len(g) for g in _ARABIC_GLYPHS if token.startswith(g, i)]
+        while ends:
+            end = ends.pop()
+            if best[end] < 0 or best[end] > best[i] + 1:
+                best[end] = best[i] + 1
+            for suffix in _GLYPH_SUFFIXES:
+                if token.startswith(suffix, end):
+                    ends.append(end + len(suffix))
+            if token.startswith("with", end):
+                ends += [
+                    end + 4 + len(g)
+                    for g in _ARABIC_GLYPHS
+                    if token.startswith(g, end + 4)
+                ]
+            # Alternate glyphs: `isolatedd`, `salla2`.
+            if end < len(token) and token[end] in "abcd0123456789":
+                if best[end + 1] < 0 or best[end + 1] > best[i] + 1:
+                    best[end + 1] = best[i] + 1
+    return max(best[-1], 0)
+
+
+def _has_glyph_names(tokens: list[str]) -> bool:
+    """Whether the text spells glyphs by their names (`yehfinalfehinitial`). One short
+    name could be an English word (`seen`); two glyphs or a suffix make it a name."""
+    named = 0
+    for token in tokens:
+        if (
+            token.isascii()
+            and token.islower()
+            and len(token) > 8
+            and _glyph_count(token)
+        ):
+            named += 1
+    return named >= _MIN_GLYPH_NAME_WORDS
+
+
+def _has_letter_fragments(tokens: list[str]) -> bool:
+    """Whether the text is mostly single ASCII characters of many kinds, as a legacy font
+    split across subsets comes out when cells break at every font change."""
+    singles = [
+        t
+        for t in tokens
+        if len(t) == 1 and t.isascii() and not t.isdigit() and t not in _LEADERS
+    ]
+    words = sum(len(t) > 1 and any(ch.isalpha() for ch in t) for t in tokens)
+    return (
+        len(singles) >= _MIN_FRAGMENTS
+        and len(singles) > _FRAGMENT_SHARE * len(tokens)
+        and len(singles) > 4 * words
+        and len(set(singles)) >= _MIN_FRAGMENT_KINDS
+    )
+
+
 def is_broken_text_layer(text: str) -> bool:
     """Whether a page's PDF text does not match the text drawn on the page.
 
@@ -186,6 +291,16 @@ def is_broken_text_layer(text: str) -> bool:
     if (
         _non_ascii_latin_share(stripped) >= _NON_ASCII_LATIN_SHARE
         and _ascii_letter_share(stripped) < _ASCII_LETTER_SHARE
+    ):
+        return True
+
+    # A font with no Unicode map, written as glyph codes, glyph names or one character
+    # per cell.
+    tokens = stripped.split()
+    if (
+        _has_glyph_codes(tokens)
+        or _has_glyph_names(tokens)
+        or _has_letter_fragments(tokens)
     ):
         return True
 

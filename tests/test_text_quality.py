@@ -93,6 +93,13 @@ ORDINARY = {
     "single_replacement_character": _PROSE + "\nx \N{REPLACEMENT CHARACTER} y\n",
     # pdfium can mark one end-of-line hyphen with a control character.
     "hyphen_control": _PROSE.replace("regions", "re\x02\ngions", 1),
+    # Numbers that are not glyph codes: page numbers, note markers, a table.
+    "page_numbers": "\n".join(str(n) for n in range(101, 141)),
+    "note_markers": " ".join(str(1 + i % 9) for i in range(60)),
+    "repeated_years_table": "Year 2023 2024 2023 2024 2023 2024\n" * 8,
+    # English words that are also Arabic letter names.
+    "letter_name_words": "We have seen a sad dad wait for the test results. " * 6,
+    "single_letter_math": "Let x y z a b c be such that x + y = z and a b = c. " * 8,
 }
 
 # Text layers from fonts whose glyphs were not mapped to real characters.
@@ -124,6 +131,19 @@ BROKEN = {
     "replacement_characters_in_many_cells": _PROSE
     + "\n"
     + "\n".join("Item " + "\N{REPLACEMENT CHARACTER}" * n for n in (4, 3, 3)),
+    # Fonts with no Unicode map, as docling-parse writes them. Glyph codes repeat
+    # (every glyph of one letter has one code).
+    "glyph_codes_as_numbers": "\n".join(
+        " ".join(str(113 + (i * 7 + j * 3) % 23) for j in range(9)) for i in range(6)
+    ),
+    # Arabic glyph names glued per word, glyphs left to right: "في من الله".
+    "arabic_glyph_names": "yehfinalfehinitial noonfinalmeeminitial "
+    "allahisolatedalefisolated lamwithalefisolatedwawisolated " * 3,
+    # A legacy Arabic font split over several font subsets: one character per cell.
+    "one_character_per_cell": "\n".join(
+        "t O ? G y A J + u y z a = g ? G y D 9 !".split()
+    )
+    * 3,
 }
 
 
